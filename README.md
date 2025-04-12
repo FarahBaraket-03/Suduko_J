@@ -18,5 +18,5 @@ java SudokuServer.java
 javac *.java 
 ```
 ```js
-java SudokuClient.java 
+java SudokuClient.java <server-ip>
 ```
