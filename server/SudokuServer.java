@@ -14,7 +14,7 @@ public class SudokuServer {
             }
             
             // Set codebase for dynamic class loading
-            System.setProperty("java.rmi.server.codebase", "http://192.168.56.1/classes/");
+            System.setProperty("java.rmi.server.codebase", "http://"+args[0]+"/classes/");
             
             // Verify codebase is accessible
             try {
