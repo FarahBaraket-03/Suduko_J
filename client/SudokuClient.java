@@ -34,7 +34,7 @@ public class SudokuClient {
         this.serverIP = serverIP;
         try {
             System.setProperty("java.security.policy", "client.policy");
-            System.setProperty("java.rmi.server.codebase", "http://192.168.56.1/classes/");
+            System.setProperty("java.rmi.server.codebase", "http://"+serverIP+"/classes/");
             
             // Verify HTTP server accessibility
             System.out.println("Testing codebase accessibility...");
