@@ -14,8 +14,8 @@ public class SudokuServer {
             }
             
             // Set codebase for dynamic class loading
-            System.setProperty("java.rmi.server.codebase", "http://192.168.56.1/classes/");
-            
+            System.setProperty("java.rmi.server.codebase", "http://"+args[0]+"/classes/");
+             System.setProperty("java.rmi.server.hostname", args[0]);
             // Verify codebase is accessible
             try {
                 new URL(System.getProperty("java.rmi.server.codebase") + "FabSudokuInterface.class").openConnection().connect();
@@ -36,6 +36,11 @@ public class SudokuServer {
             
             System.out.println("Sudoku Factory created and Server ready");
             System.out.println("Codebase: " + System.getProperty("java.rmi.server.codebase"));
+             // Keep server running
+            System.out.println("Server running. Press Ctrl+C to exit.");
+            while (true) {
+                Thread.sleep(1000);
+            }
             
         } catch (Exception e) {
             System.err.println("Server exception: " + e.toString());

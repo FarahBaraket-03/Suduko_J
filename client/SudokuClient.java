@@ -11,9 +11,7 @@ import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.net.URL;
-import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.Proxy;
-import java.lang.reflect.Method;
 import java.rmi.server.RMIClassLoader;
 
 public class SudokuClient {
@@ -32,9 +30,15 @@ public class SudokuClient {
 
     public SudokuClient(String serverIP) {
         this.serverIP = serverIP;
+        Runtime.getRuntime().addShutdownHook(new Thread(new Runnable() {
+            public void run() {
+                cleanup();
+            }
+        }));
+        
         try {
             System.setProperty("java.security.policy", "client.policy");
-            System.setProperty("java.rmi.server.codebase", "http://192.168.56.1/classes/");
+            System.setProperty("java.rmi.server.codebase", "http://"+serverIP+"/classes/");
             
             // Verify HTTP server accessibility
             System.out.println("Testing codebase accessibility...");
@@ -56,13 +60,18 @@ public class SudokuClient {
             this.clientId = "Client" + System.currentTimeMillis();
             initializeGame();
         } catch (Exception e) {
+            cleanup();
             System.err.println("Client exception: " + e.toString());
             e.printStackTrace();
-            JOptionPane.showMessageDialog(null, "Connection error: " + e.getMessage());
+            final Exception finalE = e;
+            SwingUtilities.invokeLater(new Runnable() {
+                public void run() {
+                    JOptionPane.showMessageDialog(null, "Connection error: " + finalE.getMessage());
+                }
+            });
             System.exit(1);
         }
     }
-    
 
     private void initializeGUI(String[] puzzle) {
         // Clear existing frame if it exists
@@ -186,159 +195,134 @@ public class SudokuClient {
         }
     }
 
-    private void cleanup() {
+    private void initializeGame() throws Exception {
         try {
-            // Unregister callback first
+            // Load interfaces
+            Class<?> fabInterface = RMIClassLoader.loadClass(
+                System.getProperty("java.rmi.server.codebase"), 
+                "FabSudokuInterface");
+            
+            Registry registry = LocateRegistry.getRegistry(serverIP, 1099);
+            Remote factory = registry.lookup("SudokuFactory");
+            
+            // Add retry logic
+            int retries = 3;
+            while (retries-- > 0) {
+                try {
+                    this.game = (Remote) fabInterface.getMethod("newSudoku", String.class)
+                                      .invoke(factory, clientId);
+                    if (game == null) {
+                        throw new RemoteException("Failed to create game instance");
+                    }
+                    break;
+                } catch (InvocationTargetException e) {
+                    if (e.getCause() instanceof RemoteException && 
+                        e.getCause().getMessage().contains("Maximum clients reached")) {
+                        if (retries > 0) {
+                            Thread.sleep(2000);
+                            continue;
+                        }
+                        throw new RemoteException("Server is at maximum capacity. Please try again later.");
+                    }
+                    throw e;
+                }
+            }
+
+            // Clean up previous callback
             unexportCallback();
             
-            // Only try to remove client if we successfully created a game
-            if (game != null) {
+            // Create and export callback
+            final Class<?> callbackInterface = RMIClassLoader.loadClass(
+                System.getProperty("java.rmi.server.codebase"), 
+                "SudokuCallback");
+            
+            Object callbackImpl = Proxy.newProxyInstance(
+                callbackInterface.getClassLoader(),
+                new Class<?>[] {callbackInterface},
+                new CallbackInvocationHandler());
+            
+            this.callback = UnicastRemoteObject.exportObject((Remote) callbackImpl, 0);
+            callbackExported = true;
+            
+            // Register callback
+            Class<?> gameInterface = RMIClassLoader.loadClass(
+                System.getProperty("java.rmi.server.codebase"), 
+                "SudokuInterface");
+            
+            Method registerMethod = gameInterface.getMethod("registerCallback", callbackInterface);
+            registerMethod.invoke(game, callbackImpl);
+            
+            // Initialize GUI
+            String[] puzzle = (String[]) gameInterface.getMethod("getPuzzle").invoke(game);
+            initializeGUI(puzzle);
+        } catch (Exception e) {
+            cleanup();
+            throw e;
+        }
+    }
+
+    private class CallbackInvocationHandler implements InvocationHandler {
+        public Object invoke(Object proxy, final Method method, final Object[] args) throws Throwable {
+            if ("notifyError".equals(method.getName())) {
+                final String message = (String)args[0];
+                SwingUtilities.invokeLater(new Runnable() {
+                    public void run() {
+                        JOptionPane.showMessageDialog(frame, message, "Error", JOptionPane.ERROR_MESSAGE);
+                    }
+                });
+            } 
+            else if ("notifyCompletion".equals(method.getName())) {
+                if (isCompletionDialogShown) return null;
+                isCompletionDialogShown = true;
+                SwingUtilities.invokeLater(new Runnable() {
+                    public void run() {
+                        int choice = JOptionPane.showConfirmDialog(frame, 
+                            "Congratulations! You solved the puzzle!\nDo you want to play again?", 
+                            "Game Over", JOptionPane.YES_NO_OPTION);
+                        if (choice == JOptionPane.YES_OPTION) {
+                            new SwingWorker<Void, Void>() {
+                                protected Void doInBackground() throws Exception {
+                                    resetGameWithNewPuzzle();
+                                    return null;
+                                }
+                                protected void done() {
+                                    isCompletionDialogShown = false;
+                                }
+                            }.execute();
+                        } else {
+                            cleanup();
+                            System.exit(0);
+                        }
+                    }
+                });
+            }
+            return null;
+        }
+    }
+
+    private void cleanup() {
+        try {
+            // Unregister from server
+            if (game != null && clientId != null) {
                 Class<?> fabInterface = RMIClassLoader.loadClass(
                     System.getProperty("java.rmi.server.codebase"), 
                     "FabSudokuInterface");
                 Registry registry = LocateRegistry.getRegistry(serverIP, 1099);
                 Remote factory = registry.lookup("SudokuFactory");
-                
-                // Use reflection more carefully
                 Method removeMethod = fabInterface.getMethod("removeClient", String.class);
                 removeMethod.invoke(factory, clientId);
             }
         } catch (Exception e) {
             System.err.println("Cleanup warning: " + e.getMessage());
-        }
-    }
-
-   private void initializeGame() throws Exception {
-    try {
-        // Load interfaces using RMIClassLoader
-        Class<?> fabInterface = RMIClassLoader.loadClass(
-            System.getProperty("java.rmi.server.codebase"), 
-            "FabSudokuInterface");
-        
-        Registry registry = LocateRegistry.getRegistry(serverIP, 1099);
-        Remote factory = registry.lookup("SudokuFactory");
-        
-        // Add retry logic for server busy situations
-        int retries = 3;
-        while (retries-- > 0) {
-            try {
-                this.game = (Remote) fabInterface.getMethod("newSudoku", String.class)
-                                  .invoke(factory, clientId);
-                if (game == null) {
-                    throw new RemoteException("Failed to create game instance");
-                }
-                break;
-            } catch (InvocationTargetException e) {
-                if (e.getCause() instanceof RemoteException && 
-                    e.getCause().getMessage().contains("Maximum clients reached")) {
-                    if (retries > 0) {
-                        Thread.sleep(2000); // Wait before retrying
-                        continue;
-                    }
-                    throw new RemoteException("Server is at maximum capacity. Please try again later.");
-                }
-                throw e;
-            }
-        }
-
-        // Clean up previous callback if exists
-        if (callback != null) {
-            try {
-                if (callbackExported) {
-                    UnicastRemoteObject.unexportObject(callback, true);
-                }
-            } catch (Exception e) {
-                System.err.println("Error unexporting previous callback: " + e.getMessage());
-            }
-            callback = null;
-            callbackExported = false;
-        }
-        
-        // First load the callback interface to ensure proper typing
-        final Class<?> callbackInterface = RMIClassLoader.loadClass(
-            System.getProperty("java.rmi.server.codebase"), 
-            "SudokuCallback");
-        
-        // Create callback implementation
-        Object callbackImpl = Proxy.newProxyInstance(
-            callbackInterface.getClassLoader(),
-            new Class<?>[] {callbackInterface},
-            new InvocationHandler() {
-                public Object invoke(Object proxy, final Method method, final Object[] args) throws Throwable {
-                    if ("notifyError".equals(method.getName())) {
-                        final String message = (String)args[0];
-                        SwingUtilities.invokeLater(new Runnable() {
-                            public void run() {
-                                JOptionPane.showMessageDialog(frame, message, "Error", JOptionPane.ERROR_MESSAGE);
-                            }
-                        });
-                        return null;
-                    } else if ("notifyCompletion".equals(method.getName())) {
-                        if (isCompletionDialogShown) return null;
-                        isCompletionDialogShown = true;
-                        SwingUtilities.invokeLater(new Runnable() {
-                            public void run() {
-                                int choice = JOptionPane.showConfirmDialog(frame, 
-                                    "Congratulations! You solved the puzzle!\nDo you want to play again with a different Sudoku?", 
-                                    "Game Over", JOptionPane.YES_NO_OPTION);
-                                if (choice == JOptionPane.YES_OPTION) {
-                                    new SwingWorker<Void, Void>() {
-                                        protected Void doInBackground() throws Exception {
-                                            resetGameWithNewPuzzle();
-                                            return null;
-                                        }
-                                        protected void done() {
-                                            isCompletionDialogShown = false;
-                                        }
-                                    }.execute();
-                                } else {
-                                    try {
-                                        unexportCallback();
-                                    } catch (Exception e) {
-                                        System.err.println("Error during exit: " + e.getMessage());
-                                    }
-                                    System.exit(0);
-                                }
-                            }
-                        });
-                        return null;
-                    }
-                    throw new UnsupportedOperationException();
-                }
-            });
-        
-        // Export callback object
-        this.callback = UnicastRemoteObject.exportObject((Remote) callbackImpl, 0);
-        callbackExported = true;
-        
-        // Load game interface
-        Class<?> gameInterface = RMIClassLoader.loadClass(
-            System.getProperty("java.rmi.server.codebase"), 
-            "SudokuInterface");
-        
-        // Register callback with the exact interface type
-        try {
-            Method registerMethod = gameInterface.getMethod("registerCallback", callbackInterface);
-            registerMethod.invoke(game, callbackImpl);
-        } catch (Exception e) {
+        } finally {
             unexportCallback();
-            throw e;
+            game = null;
         }
-        
-        // Get puzzle and initialize GUI
-        String[] puzzle = (String[]) gameInterface.getMethod("getPuzzle").invoke(game);
-        initializeGUI(puzzle);
-    } catch (Exception e) {
-        // Clean up if initialization fails
-        cleanup();
-        throw e;
     }
-}
 
     private void unexportCallback() {
         if (callback != null && callbackExported) {
             try {
-                // Only unexport if the object is actually exported
                 if (UnicastRemoteObject.unexportObject(callback, true)) {
                     callbackExported = false;
                 }
@@ -348,22 +332,15 @@ public class SudokuClient {
         }
         callback = null;
     }
-   
+
     private void resetGameWithNewPuzzle() {
         try {
-            // Clean up current game state
             cleanup();
-            
-            // Reset UI state
             errors = 0;
             if (textLabel != null) {
                 textLabel.setText("Sudoku: " + errors);
             }
-            
-            // Initialize a new game
             initializeGame();
-            
-            // Refresh the UI
             if (boardPanel != null) {
                 SwingUtilities.invokeLater(new Runnable() {
                     public void run() {
@@ -372,22 +349,27 @@ public class SudokuClient {
                     }
                 });
             }
-        } catch (Exception ex) {
+        } catch (final Exception ex) {
             ex.printStackTrace();
-            JOptionPane.showMessageDialog(frame, 
-                "Error resetting game: " + ex.getMessage(), 
-                "Error", JOptionPane.ERROR_MESSAGE);
+            SwingUtilities.invokeLater(new Runnable() {
+                public void run() {
+                    JOptionPane.showMessageDialog(frame, 
+                        "Error resetting game: " + ex.getMessage(), 
+                        "Error", JOptionPane.ERROR_MESSAGE);
+                }
+            });
         }
     }
-       public static void main(String[] args) {
+
+    public static void main(String[] args) {
         if (args.length < 1) {
             System.err.println("Usage: java SudokuClient <server-ip>");
             System.exit(1);
         }
-        final String serverIP = args[0];
+         final String[] finalArgs = args;
         SwingUtilities.invokeLater(new Runnable() {
             public void run() {
-                new SudokuClient(serverIP);
+                new SudokuClient(finalArgs[0]);
             }
         });
     }

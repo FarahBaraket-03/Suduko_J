@@ -4,10 +4,10 @@ import java.util.Random;
 import java.util.concurrent.locks.ReentrantLock;
 
 public class SudokuImpl extends UnicastRemoteObject implements SudokuInterface {
-    private String clientId;
-    private String[] puzzle;
-    private String[] solution;
-    private SudokuCallback callback;
+    private final String clientId;
+    private final String[] puzzle;
+    private final String[] solution;
+    private volatile SudokuCallback callback;
     private final ReentrantLock lock = new ReentrantLock();
     private static final Random random = new Random();
 
@@ -17,29 +17,37 @@ public class SudokuImpl extends UnicastRemoteObject implements SudokuInterface {
         String[][] puzzles = SudokuFactory.createPuzzles();
         String[][] solutions = SudokuFactory.createSolutions();
         int index = random.nextInt(puzzles.length);
-        this.puzzle = puzzles[index].clone(); // Create copy for each client
-        this.solution = solutions[index];
+        this.puzzle = puzzles[index].clone();
+        this.solution = solutions[index].clone();
     }
 
     @Override
     public String[] getPuzzle() throws RemoteException {
-        return puzzle.clone(); // Return copy
+        lock.lock();
+        try {
+            return puzzle.clone();
+        } finally {
+            lock.unlock();
+        }
     }
 
     @Override
     public boolean makeMove(int row, int col, int number) throws RemoteException {
+        if (row < 0 || row >= 9 || col < 0 || col >= 9 || number < 1 || number > 9) {
+            notifyErrorSafe("Invalid move coordinates");
+            return false;
+        }
+
         lock.lock();
         try {
             if (solution[row].charAt(col) == (char)(number + '0')) {
                 puzzle[row] = puzzle[row].substring(0, col) + number + puzzle[row].substring(col + 1);
-                if (isSolved() && callback != null) {
-                    callback.notifyCompletion();
+                if (isSolved()) {
+                    notifyCompletionSafe();
                 }
                 return true;
             }
-            if (callback != null) {
-                callback.notifyError("Invalid move at row " + (row+1) + ", column " + (col+1));
-            }
+            notifyErrorSafe("Invalid move at row " + (row+1) + ", column " + (col+1));
             return false;
         } finally {
             lock.unlock();
@@ -62,7 +70,41 @@ public class SudokuImpl extends UnicastRemoteObject implements SudokuInterface {
     }
 
     @Override
-    public void registerCallback(SudokuCallback callback) throws RemoteException {
-        this.callback = callback;
+    public synchronized void registerCallback(SudokuCallback callback) throws RemoteException {
+        // Clear previous callback reference
+        this.callback = null;
+        
+        // Set new callback
+        if (callback != null) {
+            this.callback = callback;
+        }
+    }
+
+    private void notifyCompletionSafe() {
+        SudokuCallback cb = this.callback;
+        if (cb != null) {
+            try {
+                cb.notifyCompletion();
+            } catch (RemoteException e) {
+                System.err.println("Error notifying completion: " + e.getMessage());
+                this.callback = null;
+            }
+        }
+    }
+
+    private void notifyErrorSafe(String message) {
+        SudokuCallback cb = this.callback;
+        if (cb != null) {
+            try {
+                cb.notifyError(message);
+            } catch (RemoteException e) {
+                System.err.println("Error notifying error: " + e.getMessage());
+                this.callback = null;
+            }
+        }
+    }
+
+    public synchronized void cleanup() {
+        this.callback = null;
     }
 }
