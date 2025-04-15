@@ -1,4 +1,5 @@
 ⚠️ I have used JDK 7
+
 ⭐ first start the server side
 
 ```js
@@ -11,7 +12,7 @@ rmic FabSudokuImpl
 ```
 
 ```js
-java SudokuServer.java 
+java SudokuServer.java <server-ip>
 ```
 
 ⭐ then  start the client side
